@@ -1,0 +1,33 @@
+
+By following these steps and using these attached files ,
+i set up an EKS cluster with ArgoCD and ALB, and create a simple CI/CD pipeline for a "Hello World" website
+1.
+main.tf
+Sets up the EKS cluster, IAM roles, ALB, Kubernetes namespace for ArgoCD, and installing ArgoCD using a Helm chart
+2.
+index.html and Dockerfile
+Defines the "Hello World" application
+3.
+deployment.yaml
+Deploys the "Hello World" application on EKS
+4.
+argocd-application.yaml
+Manages the application deployment with ArgoCD
+
+terraform init
+terraform plan
+terraform apply
+aws eks --region il-central-1 update-kubeconfig --name eks_cluster
+kubectl apply -f deployment.yaml
+kubectl apply -f argocd-app.yaml
+terraform output argocd_server_url
+kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-server -o name | grep server | awk -F'/' '{print $2}'
+Open the URL provided by the terraform output argocd_server_url in a web browser and log in using admin and the password retrieved in the previous step.
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+kubectl edit svc argocd-server -n argocd
+kubectl get svc argocd-server -n argocd
+https://localhost:8080
+./deploy_argocd.sh
+
+argocd app create hello-world --repo 'https://github.com/tomeriko2929/migdal' --path 'manifests/' --dest-namespace default --dest-server https://kubernetes.default.svc --directory-recurse
+argocd app sync hello-world

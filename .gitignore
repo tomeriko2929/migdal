@@ -1,0 +1,28 @@
+~/.aws/config
+~/.aws/credentials
+.terraform.lock.hcl
+# Local .terraform directories
+**/.terraform/*
+# Ignore Terraform state files
+*.tfstate
+*.tfstate.*
+
+# Ignore Terraform crash logs
+crash.log
+
+# Ignore Terraform plan files
+*.tfplan
+
+# Ignore Terraform variable files
+terraform.tfvars
+*.tfvars
+
+# Ignore sensitive data files
+*.pem
+*.key
+
+# Ignore temporary files created by editors or OS
+.DS_Store
+*.swp
+*.bak
+*.tmp
