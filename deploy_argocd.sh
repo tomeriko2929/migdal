@@ -13,8 +13,18 @@ echo "Applying Terraform deployment..."
 terraform apply -auto-approve
 
 # Configure kubectl for EKS
+EKS_CLUSTER_NAME="eks_cluster"
+REGION="il-central-1"
 echo "Configuring kubectl for EKS..."
-aws eks --region il-central-1 update-kubeconfig --name eks_cluster
+aws eks --region $REGION update-kubeconfig --name $EKS_CLUSTER_NAME
+
+# Verify if kubectl is configured correctly
+if kubectl get nodes; then
+    echo "kubectl is configured correctly."
+else
+    echo "Failed to configure kubectl. Please check your EKS cluster endpoint and network connectivity."
+    exit 1
+fi
 
 # Apply Kubernetes Deployments
 echo "Applying Kubernetes deployments..."

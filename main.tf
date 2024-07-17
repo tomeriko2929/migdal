@@ -1,7 +1,6 @@
 # Define the AWS provider
 provider "aws" {
-  region     = "il-central-1"
-
+  region = "il-central-1"
 }
 
 # Define the Kubernetes provider
@@ -91,6 +90,33 @@ resource "aws_eks_cluster" "eks_cluster" {
   vpc_config {
     subnet_ids = aws_subnet.public[*].id
   }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+    aws_iam_role_policy_attachment.eks_service_policy,
+    aws_iam_role_policy_attachment.eks_vpc_controller_policy
+  ]
+}
+
+# Wait for the EKS cluster endpoint to be resolvable
+resource "null_resource" "wait_for_eks" {
+  provisioner "local-exec" {
+    command = <<EOT
+COUNT=0
+MAX_RETRIES=30
+SLEEP_INTERVAL=10
+while ! nslookup ${aws_eks_cluster.eks_cluster.endpoint} && [ $COUNT -lt $MAX_RETRIES ]; do
+  echo "Waiting for EKS endpoint to be resolvable..."
+  COUNT=$((COUNT + 1))
+  sleep $SLEEP_INTERVAL
+done
+if [ $COUNT -eq $MAX_RETRIES ]; then
+  echo "EKS endpoint could not be resolved after $MAX_RETRIES attempts."
+  exit 1
+fi
+EOT
+  }
+  depends_on = [aws_eks_cluster.eks_cluster]
 }
 
 # Create an IAM role for EKS node group
@@ -127,9 +153,9 @@ resource "aws_iam_role_policy_attachment" "ecr_readonly_policy" {
 
 # Create an EKS node group
 resource "aws_eks_node_group" "eks_node_group" {
-  cluster_name    = aws_eks_cluster.eks_cluster.name
-  node_role_arn   = aws_iam_role.eks_node_group_role.arn
-  subnet_ids      = aws_subnet.public[*].id
+  cluster_name  = aws_eks_cluster.eks_cluster.name
+  node_role_arn = aws_iam_role.eks_node_group_role.arn
+  subnet_ids    = aws_subnet.public[*].id
 
   scaling_config {
     desired_size = 2
@@ -200,11 +226,33 @@ resource "aws_lb_target_group" "example" {
   }
 }
 
+# Wait until the EKS cluster is fully available
+resource "null_resource" "wait_for_eks_cluster" {
+  provisioner "local-exec" {
+    command = <<EOT
+while true; do
+  if kubectl get nodes --kubeconfig ~/.kube/config > /dev/null 2>&1; then
+    echo "EKS cluster is ready"
+    break
+  else
+    echo "Waiting for EKS cluster to be ready..."
+    sleep 30
+  fi
+done
+EOT
+  }
+  depends_on = [
+    aws_eks_cluster.eks_cluster,
+    null_resource.wait_for_eks
+  ]
+}
+
 # Create a namespace for ArgoCD in Kubernetes
 resource "kubernetes_namespace" "argocd" {
   metadata {
     name = "argocd"
   }
+  depends_on = [null_resource.wait_for_eks_cluster]
 }
 
 # Install ArgoCD using a Helm chart
@@ -213,6 +261,7 @@ resource "helm_release" "argocd" {
   repository = "https://argoproj.github.io/argo-helm"
   chart      = "argo-cd"
   namespace  = kubernetes_namespace.argocd.metadata[0].name
+  depends_on = [kubernetes_namespace.argocd]
 }
 
 # Create a service for ArgoCD
@@ -229,10 +278,16 @@ resource "kubernetes_service" "argocd" {
       port        = 80
       target_port = 8080
     }
+    type = "LoadBalancer"
   }
+  depends_on = [helm_release.argocd]
 }
 
 # Output the URL of the ArgoCD server
+locals {
+  argocd_server_status = kubernetes_service.argocd.status[0]
+}
+
 output "argocd_server_url" {
-  value = "http://${kubernetes_service.argocd.metadata[0].name}"
+  value = "http://${local.argocd_server_status.load_balancer[0].ingress[0].hostname}"
 }
