@@ -119,6 +119,35 @@ EOT
   depends_on = [aws_eks_cluster.eks_cluster]
 }
 
+# Configure kubectl for EKS
+resource "null_resource" "configure_kubectl" {
+  provisioner "local-exec" {
+    command = "aws eks --region il-central-1 update-kubeconfig --name eks_cluster"
+  }
+  depends_on = [null_resource.wait_for_eks]
+}
+
+# Wait until the EKS cluster is fully available
+resource "null_resource" "wait_for_eks_cluster" {
+  provisioner "local-exec" {
+    command = <<EOT
+while true; do
+  if kubectl get nodes --kubeconfig ~/.kube/config > /dev/null 2>&1; then
+    echo "EKS cluster is ready"
+    break
+  else
+    echo "Waiting for EKS cluster to be ready..."
+    kubectl cluster-info
+    sleep 30
+  fi
+done
+EOT
+  }
+  depends_on = [
+    null_resource.configure_kubectl
+  ]
+}
+
 # Create an IAM role for EKS node group
 resource "aws_iam_role" "eks_node_group_role" {
   name = "eks_node_group_role"
@@ -226,27 +255,6 @@ resource "aws_lb_target_group" "example" {
   }
 }
 
-# Wait until the EKS cluster is fully available
-resource "null_resource" "wait_for_eks_cluster" {
-  provisioner "local-exec" {
-    command = <<EOT
-while true; do
-  if kubectl get nodes --kubeconfig ~/.kube/config > /dev/null 2>&1; then
-    echo "EKS cluster is ready"
-    break
-  else
-    echo "Waiting for EKS cluster to be ready..."
-    sleep 30
-  fi
-done
-EOT
-  }
-  depends_on = [
-    aws_eks_cluster.eks_cluster,
-    null_resource.wait_for_eks
-  ]
-}
-
 # Create a namespace for ArgoCD in Kubernetes
 resource "kubernetes_namespace" "argocd" {
   metadata {
@@ -264,7 +272,15 @@ resource "helm_release" "argocd" {
   depends_on = [kubernetes_namespace.argocd]
 }
 
-# Create a service for ArgoCD
+# Check if the ArgoCD service already exists
+data "kubernetes_service" "existing_argocd" {
+  metadata {
+    name      = "argocd-server"
+    namespace = "argocd"
+  }
+}
+
+# Create the ArgoCD service if it does not exist
 resource "kubernetes_service" "argocd" {
   metadata {
     name      = "argocd-server"
@@ -281,11 +297,18 @@ resource "kubernetes_service" "argocd" {
     type = "LoadBalancer"
   }
   depends_on = [helm_release.argocd]
+  lifecycle {
+    ignore_changes = [
+      metadata,
+      spec,
+    ]
+    prevent_destroy = true
+  }
 }
 
-# Output the URL of the ArgoCD server
+# Local value to extract the load balancer hostname
 locals {
-  argocd_server_status = kubernetes_service.argocd.status[0]
+  argocd_server_status = try(kubernetes_service.argocd.status[0], data.kubernetes_service.existing_argocd.status[0])
 }
 
 output "argocd_server_url" {
