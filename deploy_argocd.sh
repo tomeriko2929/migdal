@@ -28,8 +28,8 @@ fi
 
 # Apply Kubernetes Deployments
 echo "Applying Kubernetes deployments..."
-kubectl apply -f deployment.yaml
-kubectl apply -f argocd-app.yaml
+kubectl apply -f manifests/deployment.yaml
+kubectl apply -f manifests/argocd-app.yaml
 
 # Get ArgoCD Server URL from Terraform Outputs
 argocd_url=$(terraform output argocd_server_url)
@@ -45,8 +45,8 @@ echo "Port-forwarding ArgoCD server for local access..."
 kubectl port-forward svc/argocd-server -n argocd 8080:443 &
 
 # Edit ArgoCD Server Service
-echo "Editing ArgoCD server service..."
-kubectl edit svc argocd-server -n argocd
+#echo "Editing ArgoCD server service..."
+#kubectl edit svc argocd-server -n argocd
 
 # Get ArgoCD Server Service details
 echo "Fetching ArgoCD server service details..."
@@ -64,7 +64,7 @@ echo "Password: $argocd_password"
 
 # Expose ArgoCD Server using LoadBalancer for Public Access
 echo "Exposing ArgoCD server using LoadBalancer..."
-kubectl edit svc argocd-server -n argocd
+#kubectl edit svc argocd-server -n argocd
 echo "Waiting for LoadBalancer IP..."
 sleep 60
 lb_ip=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].ip}')

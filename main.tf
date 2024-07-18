@@ -8,6 +8,7 @@ provider "kubernetes" {
   config_path = "~/.kube/config"
 }
 
+# Define the Helm provider
 provider "helm" {
   kubernetes {
     config_path = "~/.kube/config"
@@ -48,6 +49,18 @@ resource "aws_route_table_association" "public" {
   count          = 2
   subnet_id      = element(aws_subnet.public.*.id, count.index)
   route_table_id = aws_route_table.public.id
+}
+
+# Create a Network ACL
+resource "aws_network_acl" "public_acl" {
+  vpc_id = aws_vpc.main.id
+}
+
+# Associate the Network ACL with the subnets
+resource "aws_network_acl_association" "public_acl_association" {
+  count          = 2
+  subnet_id      = element(aws_subnet.public.*.id, count.index)
+  network_acl_id = aws_network_acl.public_acl.id
 }
 
 # Create IAM role for EKS cluster
@@ -180,6 +193,32 @@ resource "aws_iam_role_policy_attachment" "ecr_readonly_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+# Create a security group for the EKS node group
+resource "aws_security_group" "eks_node_group" {
+  vpc_id = aws_vpc.main.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
 # Create an EKS node group
 resource "aws_eks_node_group" "eks_node_group" {
   cluster_name  = aws_eks_cluster.eks_cluster.name
@@ -191,6 +230,12 @@ resource "aws_eks_node_group" "eks_node_group" {
     max_size     = 3
     min_size     = 1
   }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.ecr_readonly_policy
+  ]
 }
 
 # Create a security group for the ALB
@@ -263,13 +308,21 @@ resource "kubernetes_namespace" "argocd" {
   depends_on = [null_resource.wait_for_eks_cluster]
 }
 
+# Install ArgoCD CRDs
+resource "null_resource" "install_argocd_crds" {
+  provisioner "local-exec" {
+    command = "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/crds.yaml"
+  }
+  depends_on = [kubernetes_namespace.argocd]
+}
+
 # Install ArgoCD using a Helm chart
 resource "helm_release" "argocd" {
   name       = "argocd"
   repository = "https://argoproj.github.io/argo-helm"
   chart      = "argo-cd"
   namespace  = kubernetes_namespace.argocd.metadata[0].name
-  depends_on = [kubernetes_namespace.argocd]
+  depends_on = [null_resource.install_argocd_crds]
 }
 
 # Check if the ArgoCD service already exists
@@ -278,6 +331,7 @@ data "kubernetes_service" "existing_argocd" {
     name      = "argocd-server"
     namespace = "argocd"
   }
+  depends_on = [null_resource.wait_for_eks_cluster]
 }
 
 # Create the ArgoCD service if it does not exist
@@ -313,4 +367,85 @@ locals {
 
 output "argocd_server_url" {
   value = "http://${local.argocd_server_status.load_balancer[0].ingress[0].hostname}"
+}
+
+# Ensure the security group rule for the ALB allowing inbound traffic on port 80
+resource "null_resource" "alb_sg_rule_http" {
+  provisioner "local-exec" {
+    command = <<EOT
+if ! aws ec2 describe-security-groups --group-ids ${aws_security_group.lb.id} --query "SecurityGroups[0].IpPermissions[?FromPort==\`80\` && ToPort==\`80\` && IpProtocol==\`tcp\` && IpRanges[0].CidrIp==\`0.0.0.0/0\`]" --output text | grep -q .; then
+  aws ec2 authorize-security-group-ingress --group-id ${aws_security_group.lb.id} --protocol tcp --port 80 --cidr 0.0.0.0/0
+fi
+EOT
+  }
+  depends_on = [aws_security_group.lb]
+}
+
+# Ensure the Network ACL rule to allow inbound traffic on port 80
+resource "null_resource" "nacl_rule_http_inbound" {
+  count = 2
+  provisioner "local-exec" {
+    command = <<EOT
+if ! aws ec2 describe-network-acls --network-acl-ids ${aws_network_acl.public_acl.id} --query "NetworkAcls[0].Entries[?RuleNumber==\`${100 + count.index}\`]" --output text | grep -q .; then
+  aws ec2 create-network-acl-entry --network-acl-id ${aws_network_acl.public_acl.id} --rule-number ${100 + count.index} --protocol tcp --port-range From=80,To=80 --egress false --cidr-block 0.0.0.0/0 --rule-action allow
+fi
+EOT
+  }
+  depends_on = [aws_network_acl.public_acl]
+}
+
+# Ensure the Network ACL rule to allow outbound traffic on port 80
+resource "null_resource" "nacl_rule_http_outbound" {
+  count = 2
+  provisioner "local-exec" {
+    command = <<EOT
+if ! aws ec2 describe-network-acls --network-acl-ids ${aws_network_acl.public_acl.id} --query "NetworkAcls[0].Entries[?RuleNumber==\`${200 + count.index}\`]" --output text | grep -q .; then
+  aws ec2 create-network-acl-entry --network-acl-id ${aws_network_acl.public_acl.id} --rule-number ${200 + count.index} --protocol tcp --port-range From=80,To=80 --egress true --cidr-block 0.0.0.0/0 --rule-action allow
+fi
+EOT
+  }
+  depends_on = [aws_network_acl.public_acl]
+}
+
+# Define output for the ALB DNS name
+output "alb_dns_name" {
+  value = aws_lb.example.dns_name
+}
+
+# Ensure the security group rule for the ALB allowing inbound traffic on port 443
+resource "null_resource" "alb_sg_rule_https" {
+  provisioner "local-exec" {
+    command = <<EOT
+if ! aws ec2 describe-security-groups --group-ids ${aws_security_group.lb.id} --query "SecurityGroups[0].IpPermissions[?FromPort==\`443\` && ToPort==\`443\` && IpProtocol==\`tcp\` && IpRanges[0].CidrIp==\`0.0.0.0/0\`]" --output text | grep -q .; then
+  aws ec2 authorize-security-group-ingress --group-id ${aws_security_group.lb.id} --protocol tcp --port 443 --cidr 0.0.0.0/0
+fi
+EOT
+  }
+  depends_on = [aws_security_group.lb]
+}
+
+# Ensure the Network ACL rule to allow inbound traffic on port 443
+resource "null_resource" "nacl_rule_https_inbound" {
+  count = 2
+  provisioner "local-exec" {
+    command = <<EOT
+if ! aws ec2 describe-network-acls --network-acl-ids ${aws_network_acl.public_acl.id} --query "NetworkAcls[0].Entries[?RuleNumber==\`${300 + count.index}\`]" --output text | grep -q .; then
+  aws ec2 create-network-acl-entry --network-acl-id ${aws_network_acl.public_acl.id} --rule-number ${300 + count.index} --protocol tcp --port-range From=443,To=443 --egress false --cidr-block 0.0.0.0/0 --rule-action allow
+fi
+EOT
+  }
+  depends_on = [aws_network_acl.public_acl]
+}
+
+# Ensure the Network ACL rule to allow outbound traffic on port 443
+resource "null_resource" "nacl_rule_https_outbound" {
+  count = 2
+  provisioner "local-exec" {
+    command = <<EOT
+if ! aws ec2 describe-network-acls --network-acl-ids ${aws_network_acl.public_acl.id} --query "NetworkAcls[0].Entries[?RuleNumber==\`${400 + count.index}\`]" --output text | grep -q .; then
+  aws ec2 create-network-acl-entry --network-acl-id ${aws_network_acl.public_acl.id} --rule-number ${400 + count.index} --protocol tcp --port-range From=443,To=443 --egress true --cidr-block 0.0.0.0/0 --rule-action allow
+fi
+EOT
+  }
+  depends_on = [aws_network_acl.public_acl]
 }

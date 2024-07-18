@@ -31,3 +31,14 @@ https://localhost:8080
 
 argocd app create hello-world --repo 'https://github.com/tomeriko2929/migdal' --path 'manifests/' --dest-namespace default --dest-server https://kubernetes.default.svc --directory-recurse
 argocd app sync hello-world
+
+
+argocd_server_url = "http://adfca2470008540f9a6d7948647cd08b-1091991606.il-central-1.elb.amazonaws.com"
+ArgoCD server pod name: argocd-server-7f84b7f5bb-zlv9x
+clusterIP: 172.20.57.235
+ArgoCD UI is accessible at: https://$lb_ip"
+
+Username: admin
+Password: $argocd_password
+$argocd_password: **********
+
